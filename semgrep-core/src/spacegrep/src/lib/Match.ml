@@ -60,6 +60,7 @@ type match_ = {
 
 (* configuration used during matching *)
 type conf = {
+  src : Src_file.t;
   (* string equality function used to compare words, which can be
      case-insensitive. *)
   word_equal : string -> string -> bool;
@@ -138,13 +139,12 @@ let extend_dots_match_upto ~dots:opt_dots (last_loc : Loc.t) =
       assert (dots_end.pos_cnum <= last_start.pos_cnum);
       Some { dots with matched = (dots_start, last_end) }
 
-let close_dots ~dots:opt_dots env =
-  let src = failwith "FIXME" in
+let close_dots conf ~dots:opt_dots env =
   match opt_dots with
   | None | Some { opt_mvar = None; _ } -> Some env
   | Some { matched; opt_mvar = Some name; _ } -> (
       let start_pos, end_pos = matched in
-      let value = Src_file.region_of_pos_range src start_pos end_pos in
+      let value = Src_file.region_of_pos_range conf.src start_pos end_pos in
       match Env.find_opt name env with
       | None ->
           (* First encounter of the metavariable,
@@ -156,12 +156,13 @@ let close_dots ~dots:opt_dots env =
               if case-insensitive matching was requested. *)
           if String.equal value value0 then Some env else None )
 
-let close_dots_or_fail ~dots env f =
-  match close_dots ~dots env with None -> Fail | Some env' -> f env'
+let close_dots_or_fail conf ~dots env f =
+  match close_dots conf ~dots env with None -> Fail | Some env' -> f env'
 
-let complete_dots ~dots env last_loc =
+let complete_dots conf ~dots env last_loc =
   let dots' = last_loc |> extend_dots_match_upto ~dots in
-  close_dots_or_fail ~dots:dots' env (fun env' -> Complete (env', last_loc))
+  close_dots_or_fail conf ~dots:dots' env (fun env' ->
+      Complete (env', last_loc))
 
 (*
    Find the rightmost location in a document and return it only if it's
@@ -246,11 +247,11 @@ let rec match_ (conf : conf) ~(dots : dots option) (env : env)
   match (pat, doc) with
   | [], doc -> (
       match doc_matches_dots ~dots last_loc doc with
-      | Some last_loc -> complete_dots ~dots env last_loc
+      | Some last_loc -> complete_dots conf ~dots env last_loc
       | None -> Fail )
   | [ End ], doc -> (
       match doc_matches_dots ~dots last_loc doc with
-      | Some last_loc -> complete_dots ~dots env last_loc
+      | Some last_loc -> complete_dots conf ~dots env last_loc
       | None -> Complete (env, last_loc) )
   | End :: _, _ -> assert false
   | List pat1 :: pat2, doc -> (
@@ -259,12 +260,12 @@ let rec match_ (conf : conf) ~(dots : dots option) (env : env)
           (* No document left to match against. *)
           assert (pat1 <> []);
           if pat_matches_empty_doc pat1 && pat_matches_empty_doc pat2 then
-            complete_dots ~dots env last_loc
+            complete_dots conf ~dots env last_loc
           else Fail
       | List doc1 :: doc2 ->
           (* Indented block coincides with an indented block in the document.
              These blocks must match, independently from the rest. *)
-          close_dots_or_fail ~dots env (fun env' ->
+          close_dots_or_fail conf ~dots env (fun env' ->
               match
                 match_ conf ~dots:None env' last_loc pat1 doc1 full_match
               with
@@ -442,8 +443,10 @@ let search ?(case_sensitive = true) src pat doc =
   (* table of all matches we want to keep, keyed by end location,
      with at most one entry per end location. *)
   let conf =
-    if case_sensitive then { word_equal = String.equal }
-    else { word_equal = case_insensitive_equal }
+    let word_equal =
+      if case_sensitive then String.equal else case_insensitive_equal
+    in
+    { src; word_equal }
   in
   let end_loc_tbl = Hashtbl.create 100 in
   let fold = if starts_with_dots pat then fold_block_starts else fold_all in
