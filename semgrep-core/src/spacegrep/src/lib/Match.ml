@@ -203,10 +203,12 @@ let rec pat_matches_empty_doc pat =
    A document atom is skippable if we're within an ellipsis (dots)
    pattern and within 10 lines from the last atom matched before the ellipsis.
 *)
-let is_skippable_doc_atom ~dots loc =
-  match dots with
-  | None -> false
-  | Some max_line_num -> loc_lnum loc <= max_line_num
+let is_skippable_doc_atom ~dots:opt_dots loc =
+  match opt_dots with
+  | None -> None
+  | Some dots when loc_lnum loc <= dots.max_line_num ->
+      extend_dots_match_upto ~dots:opt_dots loc
+  | Some _ -> None
 
 (*
    A document atom can always be considered for a match unless we're
@@ -216,7 +218,7 @@ let is_skippable_doc_atom ~dots loc =
 let within_ellipsis_range ~dots loc =
   match dots with
   | None -> true (* <-- difference with 'is_skippable' *)
-  | Some max_line_num -> loc_lnum loc <= max_line_num
+  | Some dots -> loc_lnum loc <= dots.max_line_num
 
 (*
    Match a pattern against a document tree.
@@ -238,7 +240,7 @@ let within_ellipsis_range ~dots loc =
 let rec match_ (conf : conf) ~(dots : dots option) (env : env)
     (last_loc : Loc.t) (pat : Pattern_AST.node list) (doc : Doc_AST.node list)
     (cont :
-      dots:int option -> env -> Loc.t -> Pattern_AST.node list -> match_result)
+      dots:dots option -> env -> Loc.t -> Pattern_AST.node list -> match_result)
     : match_result =
   if !debug then Print_match.print pat doc;
   match (pat, doc) with
@@ -269,17 +271,20 @@ let rec match_ (conf : conf) ~(dots : dots option) (env : env)
               | Complete (env'', last_loc) ->
                   match_ conf ~dots:None env'' last_loc pat2 doc2 cont
               | Fail -> Fail)
-      | Atom (loc, _) :: doc_tail ->
+      | Atom (loc, _) :: doc_tail -> (
           (* Indented block in pattern doesn't match in the document.
              Skip document node if allowed. *)
           assert (pat1 <> []);
-          if is_skippable_doc_atom ~dots loc then
-            match_ conf ~dots env last_loc pat doc_tail cont
-          else if pat_matches_empty_doc pat1 then
-            match_ conf ~dots env last_loc pat2 doc cont
-          else Fail )
-  | Dots _ :: pat_tail, doc ->
-      let dots = extend_dots ~dots last_loc in
+          match is_skippable_doc_atom ~dots loc with
+          | Some _ as dots' ->
+              match_ conf ~dots:dots' env last_loc pat doc_tail cont
+          | None ->
+              close_dots_or_fail ~dots env (fun env' ->
+                  if pat_matches_empty_doc pat1 then
+                    match_ conf ~dots:None env' last_loc pat2 doc cont
+                  else Fail) ) )
+  | Dots (_, opt_mvar) :: pat_tail, doc ->
+      let dots = extend_dots ~dots opt_mvar last_loc in
       match_ conf ~dots env last_loc pat_tail doc cont
   | Atom (_, p) :: pat_tail, doc -> (
       match doc with
@@ -325,12 +330,13 @@ let rec match_ (conf : conf) ~(dots : dots option) (env : env)
                 in
                 match match_result with
                 | Complete _ -> match_result
-                | Fail ->
+                | Fail -> (
                     (* Pattern doesn't match document.
                        Skip document's head node if we're allowed to. *)
-                    if is_skippable_doc_atom ~dots loc then
-                      match_ conf ~dots env last_loc pat doc_tail cont
-                    else Fail ) ) )
+                    match is_skippable_doc_atom ~dots loc with
+                    | Some _ as dots' ->
+                        match_ conf ~dots:dots' env last_loc pat doc_tail cont
+                    | None -> Fail ) ) ) )
 
 (*
 let starts_after last_loc loc =
